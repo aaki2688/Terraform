@@ -1,0 +1,153 @@
+provider "aws" {
+  region = "ap-south-1"
+
+  default_tags {
+    tags = {
+      hashicorp-learn = "aws-asg"
+    }
+  }
+}
+
+# get information Availability zones that are currently available
+
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+# create a new VPC using the module 
+
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "2.77.0"
+
+  name = "main-vpc"
+  cidr = "10.0.0.0/16"
+
+  azs                  = data.aws_availability_zones.available.names
+  public_subnets       = ["10.0.4.0/24", "10.0.5.0/24", "10.0.6.0/24"]
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+}
+
+# data source which stores aws_ami information
+
+data "aws_ami" "amazon-linux" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["amzn-ami-hvm-*-x86_64-ebs"]
+  }
+}
+
+# The aws launch configuration defines what type of instances should be launched and thier settings
+
+resource "aws_launch_configuration" "terramino" {
+  name_prefix     = "learn-terraform-aws-asg-"
+  image_id        = data.aws_ami.amazon-linux.id
+  instance_type   = "t2.micro"
+  user_data       = <<EOF
+#!/bin/bash
+apt-get update
+apt-get install -y apache2
+systemctl start apache2
+systemctl enable apache2
+echo "<h1> Hello bosch</h1>" | sudo tee /var/www/html/index.html
+EOF
+  security_groups = [aws_security_group.terramino_instance.id]
+  associate_public_ip_address = true
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# The auto scaling group is a logical grouping of ec2 instances having same configuration
+
+resource "aws_autoscaling_group" "terramino" {
+  name                 = "terramino"
+  min_size             = 1
+  max_size             = 4
+  desired_capacity     = 2
+  launch_configuration = aws_launch_configuration.terramino.name
+  vpc_zone_identifier  = module.vpc.public_subnets
+
+  tag {
+    key                 = "Name"
+    value               = "HashiCorp Learn ASG - Terramino"
+    propagate_at_launch = true
+  }
+}
+
+# The load balancer is setup to distribute the traffic evenly
+
+resource "aws_lb" "terramino" {
+  name               = "learn-asg-terramino-lb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.terramino_lb.id]
+  subnets            = module.vpc.public_subnets
+}
+
+# 
+
+resource "aws_lb_listener" "terramino" {
+  load_balancer_arn = aws_lb.terramino.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.terramino.arn
+  }
+}
+
+resource "aws_lb_target_group" "terramino" {
+  name     = "learn-asg-terramino"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = module.vpc.vpc_id
+}
+
+resource "aws_autoscaling_attachment" "terramino" {
+  autoscaling_group_name = aws_autoscaling_group.terramino.id
+  lb_target_group_arn   = aws_lb_target_group.terramino.arn
+}
+
+resource "aws_security_group" "terramino_instance" {
+  name = "learn-asg-terramino-instance"
+  ingress {
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [aws_security_group.terramino_lb.id]
+  }
+
+  egress {
+    from_port       = 0
+    to_port         = 0
+    protocol        = "-1"
+    security_groups = [aws_security_group.terramino_lb.id]
+  }
+
+  vpc_id = module.vpc.vpc_id
+}
+
+resource "aws_security_group" "terramino_lb" {
+  name = "learn-asg-terramino-lb"
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  vpc_id = module.vpc.vpc_id
+}
