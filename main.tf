@@ -103,7 +103,7 @@ variable "sg1" {
 variable "sg2" {
   description = "instance type"
   type        = string
-  default     = "sg2"
+  default     = "dev-sg2"
 }
 output "public_ip" {
   value = aws_instance.my-ec2-vm.*.public_ip
